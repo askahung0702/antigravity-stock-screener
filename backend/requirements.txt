@@ -6,3 +6,5 @@ beautifulsoup4
 twstock
 python-dotenv
 sqlalchemy
+yfinance
+google-genai

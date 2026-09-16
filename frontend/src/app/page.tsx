@@ -3,6 +3,7 @@ import AiNews from '@/components/AiNews';
 import Ranking from '@/components/Ranking';
 import Screener from '@/components/Screener';
 import Valuation from '@/components/Valuation';
+import DataStatus from '@/components/DataStatus';
 import { Activity, LayoutList, Trophy } from 'lucide-react';
 import { useState } from 'react';
 
@@ -38,6 +39,7 @@ export default function Home() {
       </header>
 
       <div className="max-w-7xl mx-auto space-y-8">
+        <DataStatus />
 
         {/* 如果沒有選擇特定股票，顯示選單與對應組件 */}
         {!selectedStock ? (
@@ -50,7 +52,7 @@ export default function Home() {
                     : 'bg-gray-900 text-gray-500 hover:text-gray-300'
                   }`}
               >
-                <LayoutList className="w-5 h-5" /> 全市場掃描
+                <LayoutList className="w-5 h-5" /> 多因子觀察池
               </button>
               <button
                 onClick={() => setActiveTab('ranking')}

@@ -2,8 +2,18 @@
 import { DollarSign, TrendingUp, Trophy } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
+interface RankingStock {
+    symbol: string;
+    name: string;
+    industry: string;
+    price: number | null;
+    eps: number | null;
+    roe: number | null;
+    pe: number | null;
+}
+
 export default function Ranking({ onSelectStock }: { onSelectStock: (symbol: string) => void }) {
-    const [data, setData] = useState([]);
+    const [data, setData] = useState<RankingStock[]>([]);
     const [loading, setLoading] = useState(true);
 
     const fetchRanking = async () => {
@@ -30,8 +40,8 @@ export default function Ranking({ onSelectStock }: { onSelectStock: (symbol: str
             <div className="flex items-center gap-3 mb-6 border-b border-gray-700 pb-4">
                 <Trophy className="w-6 h-6 text-yellow-500" />
                 <div>
-                    <h2 className="text-xl font-bold text-white">低估成長潛力榜單 (Top 10)</h2>
-                    <p className="text-sm text-gray-400">嚴選 ROE &gt; 10%、持續獲利且目前本益比低於 15 倍的優質企業</p>
+                    <h2 className="text-xl font-bold text-white">觀察池低估潛力榜單 (Top 10)</h2>
+                    <p className="text-sm text-gray-400">觀察池中 ROE ≥ 10%、TTM EPS ≥ 1 且本益比不高於 15 倍的標的</p>
                 </div>
             </div>
 
@@ -41,7 +51,7 @@ export default function Ranking({ onSelectStock }: { onSelectStock: (symbol: str
                 </div>
             ) : (
                 <div className="space-y-4">
-                    {data.map((stock: any, index: number) => (
+                    {data.map((stock, index: number) => (
                         <div
                             key={stock.symbol}
                             className={`flex flex-col md:flex-row items-center justify-between p-4 rounded-lg border ${index === 0 ? 'bg-yellow-900/20 border-yellow-700/50' :
@@ -72,7 +82,7 @@ export default function Ranking({ onSelectStock }: { onSelectStock: (symbol: str
                             <div className="flex items-center justify-around w-full md:w-1/2 gap-2 text-center mb-4 md:mb-0">
                                 <div>
                                     <div className="text-xs text-gray-400 flex items-center justify-center gap-1"><DollarSign className="w-3 h-3" /> 當前股價</div>
-                                    <div className="font-bold text-yellow-400">${stock.price}</div>
+                                    <div className="font-bold text-yellow-400">{stock.price != null ? `$${stock.price}` : '-'}</div>
                                 </div>
                                 <div className="border-l border-gray-700 h-8"></div>
                                 <div>

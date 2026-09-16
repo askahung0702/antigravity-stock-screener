@@ -1,15 +1,17 @@
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_
-from typing import List, Optional
-import yfinance as yf
-import pandas as pd
-from database import SessionLocal, StockMarket, FinancialData, StockPrice
+from math import sqrt
+from statistics import mean, pstdev
+from typing import Optional
 
-router = APIRouter(
-    prefix="/api/screener",
-    tags=["screener"]
-)
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
+from database import FinancialData, SessionLocal, StockMarket, StockPrice
+from services.scoring_service import score_universe
+
+
+router = APIRouter(prefix="/api/screener", tags=["screener"])
+
 
 def get_db():
     db = SessionLocal()
@@ -18,132 +20,208 @@ def get_db():
     finally:
         db.close()
 
-@router.get("/")
-def screen_stocks(
-    db: Session = Depends(get_db),
-    min_eps: Optional[float] = Query(None, description="Minimum EPS"),
-    min_roe: Optional[float] = Query(None, description="Minimum ROE (%)"),
-    max_pe: Optional[float] = Query(None, description="Maximum P/E Ratio"),
-    market_type: Optional[str] = Query(None, description="上市 or 上櫃"),
-    industry: Optional[str] = Query(None, description="Filter by industry"),
-    limit: int = Query(50, description="Max results")
-):
-    # Base query joining StockMarket and FinancialData
-    query = db.query(StockMarket, FinancialData).join(
-        FinancialData, StockMarket.symbol == FinancialData.symbol
-    )
-    
-    # Apply filters dynamically
-    if market_type:
-        query = query.filter(StockMarket.market_type == market_type)
-    if industry:
-        query = query.filter(StockMarket.industry == industry)
-    if min_eps is not None:
-        query = query.filter(FinancialData.eps >= min_eps)
-    if min_roe is not None:
-        query = query.filter(FinancialData.roe >= min_roe)
-        
-    print(f"Executing screener query with params: EPS>={min_eps}, ROE>={min_roe}, PE<={max_pe}, Industry={industry}")    
-        
-    # We order by EPS descending as a default sorting strategy
-    results = query.order_by(desc(FinancialData.eps)).limit(limit).all()
-    print(f"Found {len(results)} base records matching DB filters.")
-    
-    # Build list of symbols for real-time yf batch download
-    yf_symbols = []
-    symbol_map = {}
-    for stock, fin in results:
-        yf_symbol = f"{stock.symbol}.TW" if stock.market_type == '上市' else f"{stock.symbol}.TWO"
-        yf_symbols.append(yf_symbol)
-        symbol_map[stock.symbol] = yf_symbol
 
-    # Fetch real-time prices
-    live_prices = {}
-    if yf_symbols:
-        try:
-            print(f"Fetching live prices via yfinance for {len(yf_symbols)} stocks...")
-            yf_data = yf.download(yf_symbols, period="1d", progress=False, threads=True)
-            if not yf_data.empty and 'Close' in yf_data:
-                close_data = yf_data['Close']
-                if len(yf_symbols) == 1:
-                    live_prices[yf_symbols[0]] = float(close_data.iloc[-1]) if not pd.isna(close_data.iloc[-1]) else 0
-                else:
-                    for s in yf_symbols:
-                        if s in close_data and not pd.isna(close_data[s].iloc[-1]):
-                            live_prices[s] = float(close_data[s].iloc[-1])
-        except Exception as e:
-            print(f"Failed to fetch real-time prices: {e}")
-            
-    output = []
-    for stock, fin in results:
-        yf_s = symbol_map[stock.symbol]
-        price_val = live_prices.get(yf_s, 0)
-        
-        # Fallback to daily close in DB if live fails
-        if price_val == 0:
-            latest_price = db.query(StockPrice).filter(StockPrice.symbol == stock.symbol).order_by(desc(StockPrice.date)).first()
-            price_val = latest_price.close if latest_price else 0
-            
-        pe_val = price_val / fin.eps if (fin.eps and fin.eps > 0 and price_val > 0) else 0
-        
-        # Apply strict API driven PE filter if requested
-        if max_pe is not None and (pe_val == 0 or pe_val > max_pe):
+def _latest_financial(db: Session, symbol: str):
+    return (
+        db.query(FinancialData)
+        .filter(FinancialData.symbol == symbol)
+        .order_by(
+            desc(FinancialData.as_of_date),
+            desc(FinancialData.year),
+            desc(FinancialData.quarter),
+            desc(FinancialData.id),
+        )
+        .first()
+    )
+
+
+def _market_metrics(db: Session, symbol: str):
+    prices = (
+        db.query(StockPrice)
+        .filter(StockPrice.symbol == symbol)
+        .order_by(desc(StockPrice.date))
+        .limit(260)
+        .all()
+    )
+    prices.reverse()
+    if not prices:
+        return {
+            "price": None,
+            "price_date": None,
+            "momentum_60d": None,
+            "volatility_60d": None,
+            "liquidity_20d": None,
+        }
+
+    closes = [
+        row.adj_close if row.adj_close and row.adj_close > 0 else row.close
+        for row in prices
+    ]
+    latest_price = prices[-1].close
+    momentum_60d = None
+    if len(closes) >= 61 and closes[-61] > 0:
+        momentum_60d = (closes[-1] / closes[-61] - 1) * 100
+
+    returns = []
+    for previous, current in zip(closes[-61:-1], closes[-60:]):
+        if previous and previous > 0:
+            returns.append(current / previous - 1)
+    volatility_60d = (
+        pstdev(returns) * sqrt(252) * 100 if len(returns) >= 20 else None
+    )
+
+    recent = prices[-20:]
+    liquidity_20d = (
+        mean((row.close or 0) * (row.volume or 0) for row in recent)
+        if recent
+        else None
+    )
+    return {
+        "price": latest_price,
+        "price_date": prices[-1].date,
+        "momentum_60d": momentum_60d,
+        "volatility_60d": volatility_60d,
+        "liquidity_20d": liquidity_20d,
+    }
+
+
+def _build_universe(db: Session):
+    stocks = (
+        db.query(StockMarket)
+        .filter(StockMarket.is_active.is_(True))
+        .order_by(StockMarket.symbol)
+        .all()
+    )
+    records = []
+    for stock in stocks:
+        financial = _latest_financial(db, stock.symbol)
+        if financial is None:
             continue
-            
-        # Calculate Worthiness Rating (0-100) and Reason
-        score = 50
-        reasons = []
-        if fin.roe >= 15:
-            score += 20
-            reasons.append("高ROE資優生")
-        elif fin.roe >= 10:
-            score += 10
-            reasons.append("ROE穩定")
-            
-        if fin.eps >= 8:
-            score += 15
-            reasons.append("高獲利能力")
-        elif fin.eps > 0:
-            score += 5
-            
-        if 0 < pe_val < 15:
-            score += 20
-            reasons.append("估值遭低估")
-        elif 15 <= pe_val <= 25:
-            score += 5
-            reasons.append("估值合理")
-        elif pe_val > 25:
-            score -= 10
-            reasons.append("估值偏高需留意")
-            
-        rating_explanation = "、".join(reasons) + "的標的" if reasons else "一般表現"
-            
-        output.append({
+        market = _market_metrics(db, stock.symbol)
+        price = market["price"]
+        eps = financial.eps
+        bvps = financial.bvps
+        pe = price / eps if price and eps and eps > 0 else financial.pe_ratio
+        pb = (
+            price / bvps
+            if price and bvps and bvps > 0
+            else financial.price_to_book
+        )
+
+        records.append({
             "symbol": stock.symbol,
             "name": stock.name,
             "industry": stock.industry,
             "market": stock.market_type,
-            "price": round(price_val, 2),
-            "eps": fin.eps,
-            "roe": fin.roe,
-            "pe": round(pe_val, 2) if pe_val > 0 else "-",
-            "score": min(100, score),
-            "rating_explanation": rating_explanation
+            "price": price,
+            "price_date": market["price_date"],
+            "eps": eps,
+            "roe": financial.roe,
+            "bvps": bvps,
+            "revenue_growth": financial.revenue_growth,
+            "earnings_growth": financial.earnings_growth,
+            "debt_to_equity": financial.debt_to_equity,
+            "pe": pe,
+            "pb": pb,
+            "momentum_60d": market["momentum_60d"],
+            "volatility_60d": market["volatility_60d"],
+            "liquidity_20d": market["liquidity_20d"],
+            "financial_as_of": financial.as_of_date,
+            "financial_period_type": financial.period_type,
+            "financial_source": financial.source,
         })
-        
-        # ... other logic
-    # Sort output dynamically by our newly calculated Investment Worthiness Score
-    output.sort(key=lambda x: x["score"], reverse=True)
-        
-    print(f"Returning {len(output)} stocks after dynamic calculations.")
-    return {"count": len(output), "results": output}
+    return score_universe(records)
+
+
+@router.get("/")
+def screen_stocks(
+    db: Session = Depends(get_db),
+    min_eps: Optional[float] = Query(None, description="Minimum TTM EPS"),
+    min_roe: Optional[float] = Query(None, description="Minimum ROE (%)"),
+    max_pe: Optional[float] = Query(None, description="Maximum trailing P/E ratio"),
+    market_type: Optional[str] = Query(None, description="上市 or 上櫃"),
+    industry: Optional[str] = Query(None, description="Filter by industry"),
+    limit: int = Query(50, ge=1, le=500, description="Max results"),
+):
+    # Score the full active universe first. Filters and limit are applied afterwards,
+    # so eligible lower-EPS stocks are no longer accidentally discarded.
+    universe = _build_universe(db)
+    filtered = []
+    for record in universe:
+        if market_type and record["market"] != market_type:
+            continue
+        if industry and record["industry"] != industry:
+            continue
+        if min_eps is not None and (
+            record["eps"] is None or record["eps"] < min_eps
+        ):
+            continue
+        if min_roe is not None and (
+            record["roe"] is None or record["roe"] < min_roe
+        ):
+            continue
+        if max_pe is not None and (
+            record["pe"] is None or record["pe"] <= 0 or record["pe"] > max_pe
+        ):
+            continue
+        filtered.append(record)
+
+    output = []
+    for record in filtered[:limit]:
+        output.append({
+            **record,
+            "price": round(record["price"], 2) if record["price"] else None,
+            "pe": round(record["pe"], 2) if record["pe"] else None,
+            "pb": round(record["pb"], 2) if record["pb"] else None,
+            "roe": round(record["roe"], 2) if record["roe"] is not None else None,
+            "momentum_60d": (
+                round(record["momentum_60d"], 2)
+                if record["momentum_60d"] is not None
+                else None
+            ),
+            "volatility_60d": (
+                round(record["volatility_60d"], 2)
+                if record["volatility_60d"] is not None
+                else None
+            ),
+            "price_date": (
+                record["price_date"].isoformat() if record["price_date"] else None
+            ),
+            "financial_as_of": (
+                record["financial_as_of"].isoformat()
+                if record["financial_as_of"]
+                else None
+            ),
+        })
+
+    return {
+        "count": len(output),
+        "universe_count": len(universe),
+        "scoring_method": "sector-aware multi-factor v1",
+        "results": output,
+    }
+
 
 @router.get("/templates/{template_name}")
 def screener_templates(template_name: str, db: Session = Depends(get_db)):
     if template_name == "high_roe_undervalued":
-        # e.g., ROE > 15%, PE < 15
-        return screen_stocks(db=db, min_roe=15.0, max_pe=15.0, limit=20)
-    elif template_name == "turnaround":
-        # e.g. EPS > 0 to simplify
-        return screen_stocks(db=db, min_eps=0.5, max_pe=20.0, limit=20)
+        return screen_stocks(
+            db=db,
+            min_eps=None,
+            min_roe=15.0,
+            max_pe=15.0,
+            market_type=None,
+            industry=None,
+            limit=20,
+        )
+    if template_name == "turnaround":
+        return screen_stocks(
+            db=db,
+            min_eps=0.01,
+            min_roe=None,
+            max_pe=20.0,
+            market_type=None,
+            industry=None,
+            limit=20,
+        )
     return {"error": "Template not found"}

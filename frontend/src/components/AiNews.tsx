@@ -1,9 +1,23 @@
 "use client";
 import React, { useState } from 'react';
-import { Search, Info, TrendingUp, AlertTriangle } from 'lucide-react';
+import { Info, TrendingUp, AlertTriangle } from 'lucide-react';
+
+interface NewsItem {
+  id: number;
+  date: string | null;
+  title: string;
+  original_content: string;
+  ai_sentiment: 'Positive' | 'Neutral' | 'Negative' | string;
+  ai_summary: string[];
+}
+
+interface NewsResponse {
+  symbol: string;
+  news: NewsItem[];
+}
 
 export default function AiNews({ symbol }: { symbol: string }) {
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<NewsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -16,8 +30,8 @@ export default function AiNews({ symbol }: { symbol: string }) {
       if (!res.ok) throw new Error('News data not found');
       const json = await res.json();
       setData(json);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'News request failed');
     } finally {
       setLoading(false);
     }
@@ -47,7 +61,7 @@ export default function AiNews({ symbol }: { symbol: string }) {
       )}
 
       <div className="space-y-4">
-        {data?.news?.map((item: any) => (
+        {data?.news?.map((item) => (
           <div key={item.id} className="bg-gray-900 p-4 rounded-lg border border-gray-700">
             <div className="flex justify-between items-start mb-2">
               <h3 className="font-semibold text-lg">{item.title}</h3>

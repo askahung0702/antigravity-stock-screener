@@ -2,10 +2,31 @@
 import { useState } from 'react';
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
+interface PeBand {
+    key: string;
+    label: string;
+    multiple: number;
+}
+
+interface ValuationData {
+    latest_price: number;
+    price_date: string | null;
+    financial_as_of: string | null;
+    financial_period_type: string | null;
+    eps: number | null;
+    bvps: number | null;
+    graham_number: number | null;
+    valuation_status: string;
+    data_quality_warnings: string[];
+    pe_bands: PeBand[];
+    river_data: Array<Record<string, string | number | null>>;
+}
+
 export default function Valuation({ symbol }: { symbol: string }) {
-    const [data, setData] = useState<any>(null);
+    const [data, setData] = useState<ValuationData | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const bandColors = ['#10B981', '#22C55E', '#3B82F6', '#F59E0B', '#EF4444'];
 
     const fetchValuation = async () => {
         if (!symbol) return;
@@ -16,8 +37,8 @@ export default function Valuation({ symbol }: { symbol: string }) {
             if (!res.ok) throw new Error('Valuation data not found or insufficient');
             const json = await res.json();
             setData(json);
-        } catch (err: any) {
-            setError(err.message);
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : 'Valuation request failed');
         } finally {
             setLoading(false);
         }
@@ -45,20 +66,31 @@ export default function Valuation({ symbol }: { symbol: string }) {
                         <div className="bg-gray-700 p-4 rounded text-center">
                             <p className="text-gray-400 text-sm">最新收盤價</p>
                             <p className="text-2xl font-bold">{data.latest_price}</p>
+                            <p className="text-xs text-gray-400 mt-1">{data.price_date || '日期未知'}</p>
                         </div>
                         <div className="bg-gray-700 p-4 rounded text-center">
                             <p className="text-gray-400 text-sm">目前 EPS / 淨值</p>
-                            <p className="text-xl font-bold">{data.eps} / {data.bvps}</p>
+                            <p className="text-xl font-bold">{data.eps ?? '-'} / {data.bvps ?? '-'}</p>
+                            <p className="text-xs text-gray-400 mt-1">{data.financial_as_of || data.financial_period_type || '期別未知'}</p>
                         </div>
                         <div className="bg-gray-700 p-4 rounded text-center">
                             <p className="text-gray-400 text-sm">葛拉漢數字 (防禦價值)</p>
-                            <p className="text-2xl font-bold text-blue-400">{data.graham_number}</p>
+                            <p className="text-2xl font-bold text-blue-400">{data.graham_number ?? '-'}</p>
                         </div>
-                        <div className={`p-4 rounded text-center ${data.valuation_status.includes('低估') ? 'bg-green-900/50 border border-green-500' : data.valuation_status.includes('高估') ? 'bg-red-900/50 border border-red-500' : 'bg-yellow-900/50 border border-yellow-500'}`}>
+                        <div className={`p-4 rounded text-center ${data.valuation_status.includes('偏低') ? 'bg-green-900/50 border border-green-500' : data.valuation_status.includes('偏高') ? 'bg-red-900/50 border border-red-500' : 'bg-yellow-900/50 border border-yellow-500'}`}>
                             <p className="text-gray-300 text-sm">當前估值判定</p>
                             <p className="text-2xl font-bold">{data.valuation_status}</p>
                         </div>
                     </div>
+
+                    {data.data_quality_warnings?.length > 0 && (
+                        <div className="rounded-lg border border-amber-500/40 bg-amber-950/30 p-4 text-sm text-amber-100">
+                            <p className="font-semibold mb-2">資料品質提醒</p>
+                            <ul className="list-disc pl-5 space-y-1">
+                                {data.data_quality_warnings.map((warning: string) => <li key={warning}>{warning}</li>)}
+                            </ul>
+                        </div>
+                    )}
 
                     <div className="bg-gray-900 p-4 rounded-xl border border-gray-700 h-[400px]">
                         <h3 className="text-sm text-gray-400 mb-2">本益比河流圖 (PE River)</h3>
@@ -73,10 +105,18 @@ export default function Valuation({ symbol }: { symbol: string }) {
                                 />
                                 <Legend />
                                 <Line type="monotone" dataKey="price" stroke="#fff" strokeWidth={3} name="股價" dot={false} />
-                                <Line type="monotone" dataKey="pe_band_10" stroke="#10B981" strokeWidth={1} strokeDasharray="5 5" name="10x PE" dot={false} />
-                                <Line type="monotone" dataKey="pe_band_15" stroke="#3B82F6" strokeWidth={1} strokeDasharray="5 5" name="15x PE" dot={false} />
-                                <Line type="monotone" dataKey="pe_band_20" stroke="#F59E0B" strokeWidth={1} strokeDasharray="5 5" name="20x PE" dot={false} />
-                                <Line type="monotone" dataKey="pe_band_25" stroke="#EF4444" strokeWidth={1} strokeDasharray="5 5" name="25x PE" dot={false} />
+                                {data.pe_bands?.map((band, index: number) => (
+                                    <Line
+                                        key={band.key}
+                                        type="monotone"
+                                        dataKey={band.key}
+                                        stroke={bandColors[index % bandColors.length]}
+                                        strokeWidth={1}
+                                        strokeDasharray="5 5"
+                                        name={band.label}
+                                        dot={false}
+                                    />
+                                ))}
                             </LineChart>
                         </ResponsiveContainer>
                     </div>
